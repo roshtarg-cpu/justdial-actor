@@ -20,12 +20,22 @@ import re
 
 from apify import Actor
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
 
 from .parser import parse_page
 from .utils import build_justdial_url, random_delay
 
 logger = logging.getLogger(__name__)
+
+_STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-IN', 'en', 'hi'] });
+window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){}, app: {} };
+const _origPermissions = window.navigator.permissions.query.bind(navigator.permissions);
+window.navigator.permissions.query = p => p.name === 'notifications'
+    ? Promise.resolve({ state: Notification.permission })
+    : _origPermissions(p);
+"""
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -60,8 +70,8 @@ async def _fetch_page(url: str, proxy_url: str | None, retries: int = 3) -> str 
                 )
                 page = await context.new_page()
 
-                # Stealth BEFORE navigation — patches JS fingerprint that Akamai checks
-                await stealth_async(page)
+                # Stealth BEFORE navigation — add_init_script runs before any page JS
+                await page.add_init_script(_STEALTH_JS)
 
                 await page.goto(url, wait_until="networkidle", timeout=60_000)
 
