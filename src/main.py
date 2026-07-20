@@ -1,13 +1,16 @@
 """
-JustDial Business Listings Scraper — curl_cffi edition
-========================================================
-JustDial is a Next.js app protected by Akamai bot detection. Akamai fingerprints
-the TLS handshake (JA3/JA4) and drops connections from headless Chromium even with
-residential proxies. curl_cffi impersonates Chrome's exact TLS fingerprint at the
-socket level, bypassing this check without needing a browser at all.
+JustDial Business Listings Scraper — direct Playwright + stealth edition
+=========================================================================
+JustDial is protected by Akamai bot detection with two layers:
+  1. TLS fingerprint check  — solved by NOT disabling HTTP/2 (Chromium's TLS matches real Chrome)
+  2. JavaScript challenge   — solved by playwright-stealth applied BEFORE navigation
 
-All listing data is server-rendered into <script id="__NEXT_DATA__"> so we only
-need an HTTP GET — no JavaScript execution required.
+playwright-stealth MUST run before page.goto(). Using crawlee's PlaywrightCrawler
+is not possible here because it navigates before our handler runs. We use the
+Playwright SDK directly for full control.
+
+All listing data is server-rendered into <script id="__NEXT_DATA__"> so once
+the page loads, extraction is a simple JSON parse — no CSS selectors needed.
 """
 
 import asyncio
@@ -16,39 +19,75 @@ import logging
 import re
 
 from apify import Actor
-from curl_cffi.requests import AsyncSession
+from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 
 from .parser import parse_page
 from .utils import build_justdial_url, random_delay
 
 logger = logging.getLogger(__name__)
 
-_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-}
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
 
-async def _fetch(url: str, proxy_url: str | None, retries: int = 3) -> str | None:
-    proxies = {"https": proxy_url, "http": proxy_url} if proxy_url else None
+async def _fetch_page(url: str, proxy_url: str | None, retries: int = 3) -> str | None:
+    proxy = {"server": proxy_url} if proxy_url else None
+
     for attempt in range(retries):
         try:
-            async with AsyncSession(impersonate="chrome120") as session:
-                r = await session.get(url, headers=_HEADERS, proxies=proxies, timeout=30)
-            if r.status_code == 200:
-                return r.text
-            Actor.log.warning("HTTP %d on %s", r.status_code, url)
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    proxy=proxy,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                    ],
+                )
+                context = await browser.new_context(
+                    locale="en-IN",
+                    timezone_id="Asia/Kolkata",
+                    viewport={"width": 1366, "height": 768},
+                    user_agent=_UA,
+                    extra_http_headers={
+                        "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
+                    },
+                )
+                page = await context.new_page()
+
+                # Stealth BEFORE navigation — patches JS fingerprint that Akamai checks
+                await stealth_async(page)
+
+                await page.goto(url, wait_until="networkidle", timeout=60_000)
+
+                # Wait for Next.js to inject __NEXT_DATA__
+                try:
+                    await page.wait_for_selector("#__NEXT_DATA__", timeout=15_000, state="attached")
+                except Exception:
+                    html = await page.content()
+                    Actor.log.warning(
+                        "No __NEXT_DATA__ after networkidle on %s (%d bytes) — possible challenge page.",
+                        url, len(html),
+                    )
+                    await browser.close()
+                    if attempt < retries - 1:
+                        await asyncio.sleep(2 ** attempt)
+                    continue
+
+                html = await page.content()
+                await browser.close()
+                return html
+
         except Exception as exc:
             Actor.log.warning("Attempt %d/%d failed for %s: %s", attempt + 1, retries, url, exc)
             if attempt < retries - 1:
                 await asyncio.sleep(2 ** attempt)
+
     return None
 
 
@@ -101,7 +140,7 @@ async def main() -> None:
             if proxy_configuration:
                 proxy_url = await proxy_configuration.new_url(session_id=f"page_{page_num}")
 
-            html = await _fetch(url, proxy_url)
+            html = await _fetch_page(url, proxy_url)
             if not html:
                 Actor.log.error("Failed to fetch page %d after retries.", page_num)
                 break
@@ -109,8 +148,7 @@ async def main() -> None:
             next_data = _extract_next_data(html)
             if not next_data:
                 Actor.log.warning(
-                    "No __NEXT_DATA__ on page %d (%d bytes) — possible block or end of results.",
-                    page_num, len(html),
+                    "No __NEXT_DATA__ on page %d (%d bytes).", page_num, len(html)
                 )
                 break
 
