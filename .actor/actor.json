@@ -1,0 +1,58 @@
+{
+  "actorSpecification": 1,
+  "name": "justdial-scraper",
+  "title": "JustDial Business Listings Scraper",
+  "description": "Scrapes business listings from JustDial.com — name, phone, address, rating, category, and more.",
+  "version": "0.1",
+  "buildTag": "latest",
+  "dockerfile": "../Dockerfile",
+  "input": "./input_schema.json",
+  "storages": {
+    "dataset": {
+      "actorSpecification": 1,
+      "fields": {},
+      "views": {
+        "overview": {
+          "title": "Business Listings",
+          "transformation": {
+            "fields": [
+              "businessName",
+              "category",
+              "phone",
+              "address",
+              "locality",
+              "city",
+              "rating",
+              "reviewCount",
+              "isVerified",
+              "hasWebsite",
+              "websiteUrl",
+              "profileUrl",
+              "openNow",
+              "yearsInBusiness"
+            ]
+          },
+          "display": {
+            "component": "table",
+            "properties": {
+              "businessName": { "label": "Business Name", "format": "text" },
+              "category":     { "label": "Category",      "format": "text" },
+              "phone":        { "label": "Phone",         "format": "text" },
+              "address":      { "label": "Address",       "format": "text" },
+              "locality":     { "label": "Locality",      "format": "text" },
+              "city":         { "label": "City",          "format": "text" },
+              "rating":       { "label": "Rating",        "format": "number" },
+              "reviewCount":  { "label": "Reviews",       "format": "number" },
+              "isVerified":   { "label": "Verified",      "format": "boolean" },
+              "hasWebsite":   { "label": "Has Website",   "format": "boolean" },
+              "websiteUrl":   { "label": "Website",       "format": "link" },
+              "profileUrl":   { "label": "Profile",       "format": "link" },
+              "openNow":      { "label": "Open Now",      "format": "boolean" },
+              "yearsInBusiness": { "label": "Years",      "format": "number" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
