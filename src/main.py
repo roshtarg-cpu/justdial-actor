@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import re
+from urllib.parse import urlparse
 
 from apify import Actor
 from playwright.async_api import async_playwright
@@ -44,8 +45,20 @@ _UA = (
 )
 
 
+def _parse_proxy(proxy_url: str | None) -> dict | None:
+    if not proxy_url:
+        return None
+    p = urlparse(proxy_url)
+    proxy = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
+    if p.username:
+        proxy["username"] = p.username
+    if p.password:
+        proxy["password"] = p.password
+    return proxy
+
+
 async def _fetch_page(url: str, proxy_url: str | None, retries: int = 3) -> str | None:
-    proxy = {"server": proxy_url} if proxy_url else None
+    proxy = _parse_proxy(proxy_url)
 
     for attempt in range(retries):
         try:
