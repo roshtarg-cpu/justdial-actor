@@ -1,27 +1,33 @@
 # JustDial Business Listings Scraper
 
-Scrapes public business listings from [JustDial.com](https://www.justdial.com) — India's largest local-business directory.
+Extract structured business lead data from [JustDial.com](https://www.justdial.com) — India's largest local business directory — with no manual effort.
 
-Built with **Python**, **Crawlee** (`BeautifulSoupCrawler`), and the **Apify SDK**.
+Search by category and city to get clean, export-ready records: business name, phone number, address, rating, review count, verified status, open/closed status, years in business, and a direct profile link.
 
 ---
 
-## What it does
+## What you get
 
-Given a business category and an Indian city, the actor fetches paginated JustDial search results and outputs one structured record per listing.
+| Field | Type | Example |
+|---|---|---|
+| `businessName` | string | `Pind Balluchi Restaurant` |
+| `category` | string | `Restaurants` |
+| `phone` | string | `08123061405` |
+| `address` | string | `Sector 63 Market, Noida Sector 62` |
+| `locality` | string | `Noida Sector 62` |
+| `city` | string | `Noida` |
+| `rating` | float | `4.1` |
+| `reviewCount` | integer | `4642` |
+| `isVerified` | boolean | `true` |
+| `hasWebsite` | boolean | `false` |
+| `websiteUrl` | string\|null | `null` |
+| `profileUrl` | string | `https://www.justdial.com/Noida/Pind-Balluchi-...` |
+| `openNow` | boolean\|null | `false` |
+| `yearsInBusiness` | integer\|null | `9` |
 
 ---
 
 ## Input
-
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `searchQuery` | string | ✅ | — | Business type, e.g. `restaurants`, `dentists`, `plumbers` |
-| `city` | string | ✅ | — | Indian city name, e.g. `Delhi`, `Mumbai`, `Bangalore` |
-| `maxResults` | integer | — | `50` | Maximum listings to return (1–500) |
-| `proxyConfiguration` | object | — | — | Apify proxy settings (residential recommended) |
-
-### Example input
 
 ```json
 {
@@ -35,92 +41,65 @@ Given a business category and an Indian city, the actor fetches paginated JustDi
 }
 ```
 
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `searchQuery` | ✅ | — | Business type: `restaurants`, `dentists`, `plumbers`, etc. |
+| `city` | ✅ | — | Indian city: `Delhi`, `Mumbai`, `Bangalore`, etc. |
+| `maxResults` | — | `50` | Max listings to return (1–500) |
+| `proxyConfiguration` | — | — | Apify proxy settings — **RESIDENTIAL recommended** |
+
 ---
 
-## Output
+## Use cases
 
-Each record in the dataset has these fields:
+- **Sales lead generation** — get phone numbers and addresses for cold outreach
+- **Market research** — map competitors by city and category
+- **AI pipelines** — feed structured business data directly into agents or CRMs
+- **Directory building** — compile local business databases for any Indian city
+- **Rating analysis** — track ratings and review counts across a category
 
-| Field | Type | Description |
-|---|---|---|
-| `businessName` | string \| null | Name of the business |
-| `category` | string \| null | Business category / type |
-| `phone` | string \| null | Decoded phone number |
-| `address` | string \| null | Full address text |
-| `locality` | string \| null | Neighbourhood / locality name |
-| `city` | string | City as provided in input |
-| `rating` | float \| null | Star rating (0–5) |
-| `reviewCount` | integer \| null | Number of reviews |
-| `isVerified` | boolean | Whether the listing is JustDial-verified |
-| `hasWebsite` | boolean | Whether the business has a website listed |
-| `websiteUrl` | string \| null | Website URL if present |
-| `profileUrl` | string \| null | Full JustDial profile URL |
-| `openNow` | boolean \| null | Open/closed status at scrape time |
-| `yearsInBusiness` | integer \| null | Years since establishment |
+---
 
-### Example output record
+## How it works
+
+JustDial is a Next.js app that embeds all search results as a JSON object (`__NEXT_DATA__`) in the initial HTML. This actor:
+
+1. Opens each search page in a real Chromium browser (via Playwright) to pass bot-detection
+2. Extracts the embedded JSON — no fragile CSS selectors
+3. Maps the clean data fields to the output schema
+4. Paginates automatically until `maxResults` is reached
+5. Adds 1.5–3 s random delays between pages to respect rate limits
+
+Phone numbers are available directly in the JSON (no CSS decoding required).
+
+---
+
+## Tips
+
+- **Use RESIDENTIAL proxies** — JustDial runs Akamai bot detection. Datacenter IPs will be blocked.
+- One JustDial page returns ~10 listings. For 100 results the actor fetches ~10 pages.
+- Results are ready to export as **CSV, JSON, or Excel** from the dataset view.
+- The `profileUrl` field links directly to each business's full JustDial page for deeper scraping.
+
+---
+
+## Output example
 
 ```json
 {
-  "businessName": "Spice Garden Restaurant",
+  "businessName": "Pind Balluchi Restaurant",
   "category": "Restaurants",
-  "phone": "9876543210",
-  "address": "12, MG Road, Opposite Central Mall, Andheri West, Mumbai",
-  "locality": "Andheri West",
-  "city": "Mumbai",
-  "rating": 4.2,
-  "reviewCount": 318,
+  "phone": "08123061405",
+  "address": "Sector 63 Market Noida Sector 62",
+  "locality": "Noida Sector 62",
+  "city": "Noida",
+  "rating": 4.1,
+  "reviewCount": 4642,
   "isVerified": true,
-  "hasWebsite": true,
-  "websiteUrl": "https://www.spicegarden.in",
-  "profileUrl": "https://www.justdial.com/Mumbai/Spice-Garden-Restaurant/...",
-  "openNow": true,
-  "yearsInBusiness": 12
+  "hasWebsite": false,
+  "websiteUrl": null,
+  "profileUrl": "https://www.justdial.com/Noida/Pind-Balluchi-Restaurant-Sector-63-Market-Noida-Sector-62/011PXX11-XX11-170123181948-M3H8_BZDET",
+  "openNow": false,
+  "yearsInBusiness": 9
 }
 ```
-
----
-
-## Technical notes
-
-### Phone number decoding
-
-JustDial obfuscates phone numbers with CSS `:before` pseudo-elements. Each digit is stored in a `<span>` with a class that maps to a character via the page's inline `<style>` block. The actor:
-
-1. Extracts the `{class → character}` mapping from every `<style>` tag.
-2. Walks each phone-number container's spans to reconstruct digits.
-3. Falls back to `tel:` href links if the mapping yields nothing.
-
-### Anti-scraping
-
-- **Proxy rotation** — pass `proxyConfiguration` with `RESIDENTIAL` group for best results.
-- **User-agent rotation** — 10 realistic desktop/mobile UAs, picked randomly per request.
-- **Random delays** — 1.5–3 s between page requests.
-- **Automatic retries** — up to 3 retries per failed request (handled by Crawlee).
-- **CAPTCHA detection** — the actor logs a clear error and skips the page rather than crashing.
-
-### Pagination
-
-JustDial search results are split across pages. The actor automatically discovers and queues the next-page URL until `maxResults` is reached.
-
----
-
-## Local development
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run locally (requires Apify CLI or APIFY_TOKEN env var for storage)
-python -m src
-```
-
-Set `APIFY_TOKEN` in your environment or use the Apify CLI (`apify run`) to persist results to the Apify platform.
-
----
-
-## Limitations
-
-- JustDial occasionally serves a CAPTCHA — residential proxies reduce (but don't eliminate) this.
-- JustDial's HTML structure changes periodically; if zero results are returned, the CSS selectors in `src/parser.py` may need updating.
-- Phone numbers are only decoded when JustDial includes its CSS mapping on the page. Some pages omit it, resulting in `null` phone fields.
