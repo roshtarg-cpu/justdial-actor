@@ -1,69 +1,69 @@
 """
-JustDial Business Listings Scraper — Playwright edition
-=========================================================
-JustDial is a Next.js SPA protected by Akamai bot detection. Plain HTTP
-clients (even those that mimic browser TLS) receive an empty <HTML></HTML>
-response. Only a real Chromium browser executing the Akamai JS challenge
-gets the actual page.
+JustDial Business Listings Scraper — curl_cffi edition
+========================================================
+JustDial is a Next.js app protected by Akamai bot detection. Akamai fingerprints
+the TLS handshake (JA3/JA4) and drops connections from headless Chromium even with
+residential proxies. curl_cffi impersonates Chrome's exact TLS fingerprint at the
+socket level, bypassing this check without needing a browser at all.
 
-Approach
---------
-1. PlaywrightCrawler opens each search-result page in a real Chromium tab.
-2. We wait for Next.js to embed the full dataset in <script id="__NEXT_DATA__">.
-3. We extract and parse that JSON — no CSS selectors, no phone-CSS decoding.
-   All fields (name, phone, address, rating, verified, open status, years...)
-   are available directly in the JSON.
-4. Pagination: JustDial appends /page-2, /page-3, … to the base URL.
-   We queue subsequent pages until maxResults is reached or the page is empty.
+All listing data is server-rendered into <script id="__NEXT_DATA__"> so we only
+need an HTTP GET — no JavaScript execution required.
 """
 
 import asyncio
 import json
 import logging
-import random
-from datetime import timedelta
+import re
 
 from apify import Actor
-from playwright_stealth import stealth_async
+from curl_cffi.requests import AsyncSession
 
 from .parser import parse_page
 from .utils import build_justdial_url, random_delay
 
 logger = logging.getLogger(__name__)
 
-try:
-    from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
-    from crawlee import Request
-except ImportError as e:
-    raise ImportError(
-        "crawlee[playwright] is required. Run: pip install 'crawlee[playwright]'"
-    ) from e
+_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 
-# ---------------------------------------------------------------------------
-# Shared mutable state (written and read inside crawler handlers)
-# ---------------------------------------------------------------------------
-class _State:
-    def __init__(self, max_results: int) -> None:
-        self.results_count = 0
-        self.max_results = max_results
-        self.done = False
-        self.pages_scraped = 0
+async def _fetch(url: str, proxy_url: str | None, retries: int = 3) -> str | None:
+    proxies = {"https": proxy_url, "http": proxy_url} if proxy_url else None
+    for attempt in range(retries):
+        try:
+            async with AsyncSession(impersonate="chrome120") as session:
+                r = await session.get(url, headers=_HEADERS, proxies=proxies, timeout=30)
+            if r.status_code == 200:
+                return r.text
+            Actor.log.warning("HTTP %d on %s", r.status_code, url)
+        except Exception as exc:
+            Actor.log.warning("Attempt %d/%d failed for %s: %s", attempt + 1, retries, url, exc)
+            if attempt < retries - 1:
+                await asyncio.sleep(2 ** attempt)
+    return None
 
-    @property
-    def needs_more(self) -> bool:
-        return not self.done and self.results_count < self.max_results
 
+def _extract_next_data(html: str) -> dict | None:
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return None
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 async def main() -> None:
     async with Actor:
-        # ----------------------------------------------------------------
-        # 1. Input
-        # ----------------------------------------------------------------
         actor_input = await Actor.get_input() or {}
 
         search_query: str = actor_input.get("searchQuery", "").strip()
@@ -72,9 +72,7 @@ async def main() -> None:
         proxy_config_input = actor_input.get("proxyConfiguration")
 
         if not search_query or not city:
-            await Actor.fail(
-                status_message="Both 'searchQuery' and 'city' are required."
-            )
+            await Actor.fail(status_message="Both 'searchQuery' and 'city' are required.")
             return
 
         Actor.log.info(
@@ -82,9 +80,6 @@ async def main() -> None:
             search_query, city, max_results,
         )
 
-        # ----------------------------------------------------------------
-        # 2. Proxy
-        # ----------------------------------------------------------------
         proxy_configuration = None
         if proxy_config_input:
             try:
@@ -95,149 +90,57 @@ async def main() -> None:
             except Exception as exc:
                 Actor.log.warning("Could not create proxy config: %s", exc)
 
-        # ----------------------------------------------------------------
-        # 3. State
-        # ----------------------------------------------------------------
-        state = _State(max_results)
+        results_count = 0
+        page_num = 1
 
-        # ----------------------------------------------------------------
-        # 4. Playwright crawler
-        # ----------------------------------------------------------------
-        crawler = PlaywrightCrawler(
-            proxy_configuration=proxy_configuration,
-            max_request_retries=3,
-            request_handler_timeout=timedelta(seconds=120),
-            headless=True,
-            browser_type="chromium",
-            browser_launch_options={
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
-            },
-            browser_new_context_options={
-                "locale": "en-IN",
-                "timezone_id": "Asia/Kolkata",
-                "extra_http_headers": {
-                    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
-                },
-            },
-            goto_options={
-                "wait_until": "domcontentloaded",
-            },
-        )
+        while results_count < max_results:
+            url = build_justdial_url(city, search_query, page=page_num)
+            Actor.log.info("Fetching page %d: %s", page_num, url)
 
-        @crawler.router.default_handler
-        async def handle_page(context: PlaywrightCrawlingContext) -> None:
-            if not state.needs_more:
-                return
+            proxy_url = None
+            if proxy_configuration:
+                proxy_url = await proxy_configuration.new_url(session_id=f"page_{page_num}")
 
-            page = context.page
-            await stealth_async(page)
-            url = context.request.url
+            html = await _fetch(url, proxy_url)
+            if not html:
+                Actor.log.error("Failed to fetch page %d after retries.", page_num)
+                break
 
-            # --------------------------------------------------------
-            # Wait for Next.js to inject __NEXT_DATA__
-            # --------------------------------------------------------
-            try:
-                await page.wait_for_selector(
-                    "#__NEXT_DATA__",
-                    timeout=60_000,
-                    state="attached",
-                )
-            except Exception:
+            next_data = _extract_next_data(html)
+            if not next_data:
                 Actor.log.warning(
-                    "Timed out waiting for __NEXT_DATA__ on %s — "
-                    "possible CAPTCHA or network block. Enable residential proxies.",
-                    url,
+                    "No __NEXT_DATA__ on page %d (%d bytes) — possible block or end of results.",
+                    page_num, len(html),
                 )
-                return
+                break
 
-            # --------------------------------------------------------
-            # Extract the JSON blob
-            # --------------------------------------------------------
-            raw_json: str = await page.evaluate(
-                "document.getElementById('__NEXT_DATA__').textContent"
-            )
-            try:
-                next_data = json.loads(raw_json)
-            except json.JSONDecodeError as exc:
-                Actor.log.error("Could not parse __NEXT_DATA__ JSON: %s", exc)
-                return
-
-            # --------------------------------------------------------
-            # Parse listings
-            # --------------------------------------------------------
-            listings, pagination = parse_page(next_data, city)
-            state.pages_scraped += 1
-
+            listings, _ = parse_page(next_data, city)
             if not listings:
-                Actor.log.warning(
-                    "Page %d (%s): zero listings parsed.", state.pages_scraped, url
-                )
-                return
+                Actor.log.info("No listings on page %d — end of results.", page_num)
+                break
 
-            Actor.log.info(
-                "Page %d: %d listings found", state.pages_scraped, len(listings)
-            )
+            Actor.log.info("Page %d: %d listings found", page_num, len(listings))
 
-            # --------------------------------------------------------
-            # Push to dataset
-            # --------------------------------------------------------
             for item in listings:
-                if not state.needs_more:
-                    state.done = True
+                if results_count >= max_results:
                     break
                 await Actor.push_data(item)
-                state.results_count += 1
+                results_count += 1
 
-                if state.results_count % 10 == 0:
-                    Actor.log.info(
-                        "Progress: %d / %d results saved",
-                        state.results_count, state.max_results,
-                    )
+            Actor.log.info("Progress: %d / %d", results_count, max_results)
 
-            # --------------------------------------------------------
-            # Pagination — queue next page if needed
-            # --------------------------------------------------------
-            if state.needs_more and len(listings) > 0:
+            if results_count < max_results:
                 await random_delay(1.5, 3.0)
+                page_num += 1
 
-                next_page_num = state.pages_scraped + 1
-                next_url = _next_page_url(url, next_page_num)
-                Actor.log.info("Queuing page %d: %s", next_page_num, next_url)
-                await context.add_requests([Request.from_url(next_url)])
-
-        # ----------------------------------------------------------------
-        # 5. Run
-        # ----------------------------------------------------------------
-        start_url = build_justdial_url(city, search_query, page=1)
-        await crawler.run([Request.from_url(start_url)])
-
-        # ----------------------------------------------------------------
-        # 6. Summary
-        # ----------------------------------------------------------------
         Actor.log.info(
             "Done. Results saved: %d / %d | Pages: %d",
-            state.results_count, state.max_results, state.pages_scraped,
+            results_count, max_results, page_num,
         )
-        if state.results_count == 0:
+        if results_count == 0:
             Actor.log.warning(
-                "Zero results saved. Possible causes:\n"
-                "  • JustDial blocked the browser (use residential proxies)\n"
+                "Zero results. Possible causes:\n"
+                "  • JustDial blocked the request — use RESIDENTIAL proxies with country=IN\n"
                 "  • The city/searchQuery returned no results\n"
-                "  • JustDial changed their Next.js data structure"
+                "  • JustDial changed their data structure"
             )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _next_page_url(current_url: str, page_num: int) -> str:
-    """Construct the URL for page N from the current URL."""
-    import re
-    # Remove any existing /page-N suffix
-    base = re.sub(r"/page-\d+/?$", "", current_url.rstrip("/"))
-    return f"{base}/page-{page_num}"
