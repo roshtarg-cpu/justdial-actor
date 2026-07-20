@@ -24,6 +24,7 @@ import random
 from datetime import timedelta
 
 from apify import Actor
+from playwright_stealth import stealth_async
 
 from .parser import parse_page
 from .utils import build_justdial_url, random_delay
@@ -110,7 +111,6 @@ async def main() -> None:
             browser_type="chromium",
             browser_launch_options={
                 "args": [
-                    "--disable-http2",          # avoid HTTP/2 GOAWAY blocks
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
@@ -121,7 +121,6 @@ async def main() -> None:
                 "timezone_id": "Asia/Kolkata",
                 "extra_http_headers": {
                     "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
-                    "DNT": "1",
                 },
             },
             goto_options={
@@ -135,6 +134,7 @@ async def main() -> None:
                 return
 
             page = context.page
+            await stealth_async(page)
             url = context.request.url
 
             # --------------------------------------------------------
