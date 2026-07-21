@@ -48,7 +48,8 @@ async def _fetch(url: str, proxy_url: str | None) -> str | None:
             firefox_user_prefs={"security.sandbox.content.level": 0},
         ) as browser:
             page = await browser.new_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.goto(url, wait_until="networkidle", timeout=90000)
+            await page.wait_for_timeout(3000)
             html = await page.content()
             Actor.log.info("Response size: %d bytes", len(html))
             if len(html) > 500:
