@@ -1,17 +1,11 @@
 """
-JustDial Business Listings Scraper — Apify Scraping Browser edition
-====================================================================
-JustDial is protected by Akamai bot detection that requires:
-  1. Chrome-identical TLS + HTTP/2 fingerprint
-  2. JavaScript sensor data collected and signed by the browser
+JustDial Business Listings Scraper — ScraperAPI edition
+=========================================================
+JustDial is protected by Akamai bot detection that requires a real browser
+to complete a JavaScript challenge. ScraperAPI handles this transparently:
+we send them the URL, they return the rendered HTML.
 
-Both are handled by Apify's Scraping Browser — a managed real Chrome instance
-accessible via CDP WebSocket. We connect to it instead of launching a local browser.
-
-All listing data is in <script id="__NEXT_DATA__"> — once we get past Akamai,
-extraction is a simple JSON parse.
-
-Setup required: Enable "Scraping Browser" in your Apify actor's settings.
+Requires SCRAPERAPI_KEY environment variable set in actor settings.
 """
 
 import asyncio
@@ -20,56 +14,43 @@ import logging
 import os
 import re
 
+import aiohttp
 from apify import Actor
-from playwright.async_api import async_playwright
 
 from .parser import parse_page
 from .utils import build_justdial_url, random_delay
 
 logger = logging.getLogger(__name__)
 
+_SCRAPERAPI_URL = "https://api.scraperapi.com/"
 
-async def _fetch_page(url: str, retries: int = 3) -> str | None:
-    token = os.environ.get("APIFY_TOKEN", "")
-    endpoint = f"wss://chrome.apify.com?token={token}"
+
+async def _fetch(url: str, api_key: str, retries: int = 3) -> str | None:
+    params = {
+        "api_key": api_key,
+        "url": url,
+        "render": "true",
+        "country_code": "in",
+    }
+    timeout = aiohttp.ClientTimeout(total=120)
 
     for attempt in range(retries):
         try:
-            async with async_playwright() as pw:
-                Actor.log.info("Connecting to Apify Scraping Browser (attempt %d)…", attempt + 1)
-                browser = await pw.chromium.connect_over_cdp(endpoint, timeout=30_000)
-
-                context = await browser.new_context(
-                    locale="en-IN",
-                    timezone_id="Asia/Kolkata",
-                    extra_http_headers={
-                        "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
-                    },
-                )
-                page = await context.new_page()
-
-                await page.goto(url, wait_until="networkidle", timeout=60_000)
-
-                try:
-                    await page.wait_for_selector("#__NEXT_DATA__", timeout=15_000, state="attached")
-                except Exception:
-                    html = await page.content()
-                    Actor.log.warning(
-                        "No __NEXT_DATA__ after networkidle (%d bytes) — possible block.", len(html)
-                    )
-                    await browser.close()
-                    if attempt < retries - 1:
-                        await asyncio.sleep(3)
-                    continue
-
-                html = await page.content()
-                await browser.close()
-                return html
-
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(_SCRAPERAPI_URL, params=params) as r:
+                    Actor.log.info("Attempt %d: HTTP %d", attempt + 1, r.status)
+                    if r.status == 200:
+                        html = await r.text()
+                        if len(html) > 500:
+                            return html
+                        Actor.log.warning("Short response (%d bytes)", len(html))
+                    else:
+                        Actor.log.warning("ScraperAPI error: HTTP %d", r.status)
         except Exception as exc:
             Actor.log.warning("Attempt %d/%d failed: %s", attempt + 1, retries, exc)
-            if attempt < retries - 1:
-                await asyncio.sleep(2 ** attempt)
+
+        if attempt < retries - 1:
+            await asyncio.sleep(2 ** attempt)
 
     return None
 
@@ -96,16 +77,15 @@ async def main() -> None:
             await Actor.fail(status_message="Both 'searchQuery' and 'city' are required.")
             return
 
+        api_key = os.environ.get("SCRAPERAPI_KEY", "").strip()
+        if not api_key:
+            await Actor.fail(status_message="SCRAPERAPI_KEY environment variable not set.")
+            return
+
         Actor.log.info(
             "JustDial scrape — query: '%s' | city: '%s' | max: %d",
             search_query, city, max_results,
         )
-
-        if not os.environ.get("APIFY_TOKEN"):
-            await Actor.fail(
-                status_message="APIFY_TOKEN not found. Enable 'Scraping Browser' in actor settings."
-            )
-            return
 
         results_count = 0
         page_num = 1
@@ -114,7 +94,7 @@ async def main() -> None:
             url = build_justdial_url(city, search_query, page=page_num)
             Actor.log.info("Fetching page %d: %s", page_num, url)
 
-            html = await _fetch_page(url)
+            html = await _fetch(url, api_key)
             if not html:
                 Actor.log.error("Failed to fetch page %d after retries.", page_num)
                 break
@@ -147,10 +127,3 @@ async def main() -> None:
             "Done. Results saved: %d / %d | Pages: %d",
             results_count, max_results, page_num,
         )
-        if results_count == 0:
-            Actor.log.warning(
-                "Zero results. Check:\n"
-                "  • Scraping Browser is enabled in actor settings\n"
-                "  • The city/searchQuery is valid\n"
-                "  • JustDial has not changed their data structure"
-            )
