@@ -8,33 +8,23 @@
       "type": "string",
       "description": "Business type to search, e.g. 'restaurants', 'dentists', 'plumbers'.",
       "editor": "textfield",
-      "example": "restaurants"
+      "default": "restaurants"
     },
     "city": {
       "title": "City",
       "type": "string",
       "description": "Indian city name, e.g. 'Delhi', 'Mumbai', 'Bangalore'.",
       "editor": "textfield",
-      "example": "Delhi"
+      "default": "Delhi"
     },
     "maxResults": {
       "title": "Max Results",
       "type": "integer",
-      "description": "Maximum number of listings to return. One JustDial page returns ~10–20 listings.",
+      "description": "Maximum number of listings to return. One JustDial page returns ~10 listings.",
       "default": 50,
       "minimum": 1,
       "maximum": 500,
       "editor": "number"
-    },
-    "proxyConfiguration": {
-      "title": "Proxy Configuration",
-      "type": "object",
-      "description": "Apify proxy settings. Residential proxies are strongly recommended to avoid blocks.",
-      "editor": "proxy",
-      "prefill": {
-        "useApifyProxy": true,
-        "apifyProxyGroups": ["RESIDENTIAL"]
-      }
     }
   },
   "required": ["searchQuery", "city"]
