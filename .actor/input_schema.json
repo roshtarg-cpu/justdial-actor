@@ -26,6 +26,17 @@
       "maximum": 500,
       "editor": "number"
     }
+    },
+    "proxyConfiguration": {
+      "title": "Proxy Configuration",
+      "type": "object",
+      "description": "Apify proxy settings. Residential proxies recommended to avoid blocks.",
+      "editor": "proxy",
+      "prefill": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["RESIDENTIAL"]
+      }
+    }
   },
   "required": ["searchQuery", "city"]
 }
