@@ -34,10 +34,7 @@ Search by category and city to get clean, export-ready records: business name, p
   "searchQuery": "restaurants",
   "city": "Mumbai",
   "maxResults": 100,
-  "proxyConfiguration": {
-    "useApifyProxy": true,
-    "apifyProxyGroups": ["RESIDENTIAL"]
-  }
+  "scraperApiKey": "YOUR_SCRAPERAPI_KEY"
 }
 ```
 
@@ -46,7 +43,7 @@ Search by category and city to get clean, export-ready records: business name, p
 | `searchQuery` | ✅ | — | Business type: `restaurants`, `dentists`, `plumbers`, etc. |
 | `city` | ✅ | — | Indian city: `Delhi`, `Mumbai`, `Bangalore`, etc. |
 | `maxResults` | — | `50` | Max listings to return (1–500) |
-| `proxyConfiguration` | — | — | Apify proxy settings — **RESIDENTIAL recommended** |
+| `scraperApiKey` | ✅ | — | Your [ScraperAPI](https://www.scraperapi.com/) key — required to bypass bot detection |
 
 ---
 
@@ -64,8 +61,8 @@ Search by category and city to get clean, export-ready records: business name, p
 
 JustDial is a Next.js app that embeds all search results as a JSON object (`__NEXT_DATA__`) in the initial HTML. This actor:
 
-1. Opens each search page in a real Chromium browser (via Playwright) to pass bot-detection
-2. Extracts the embedded JSON — no fragile CSS selectors
+1. Routes each request through [ScraperAPI](https://www.scraperapi.com/) using premium Indian residential IPs to bypass Akamai bot detection
+2. Extracts the embedded JSON — no fragile CSS selectors, no browser required
 3. Maps the clean data fields to the output schema
 4. Paginates automatically until `maxResults` is reached
 5. Adds 1.5–3 s random delays between pages to respect rate limits
@@ -76,7 +73,7 @@ Phone numbers are available directly in the JSON (no CSS decoding required).
 
 ## Tips
 
-- **Use RESIDENTIAL proxies** — JustDial runs Akamai bot detection. Datacenter IPs will be blocked.
+- **ScraperAPI key required** — get a free key at [scraperapi.com](https://www.scraperapi.com/). Pass it as `scraperApiKey` input or set `SCRAPERAPI_KEY` as an environment variable in actor settings.
 - One JustDial page returns ~10 listings. For 100 results the actor fetches ~10 pages.
 - Results are ready to export as **CSV, JSON, or Excel** from the dataset view.
 - The `profileUrl` field links directly to each business's full JustDial page for deeper scraping.

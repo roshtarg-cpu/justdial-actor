@@ -1,11 +1,11 @@
 """
 JustDial Business Listings Scraper — ScraperAPI edition
 =========================================================
-JustDial is protected by Akamai bot detection that requires a real browser
-to complete a JavaScript challenge. ScraperAPI handles this transparently:
-we send them the URL, they return the rendered HTML.
+JustDial is protected by Akamai bot detection. ScraperAPI with premium Indian
+residential IPs bypasses it without a browser — JustDial serves __NEXT_DATA__
+in the initial HTML, so no JS execution is needed.
 
-Requires SCRAPERAPI_KEY environment variable set in actor settings.
+Requires scraperApiKey actor input or SCRAPERAPI_KEY environment variable.
 """
 
 import asyncio
