@@ -25,7 +25,6 @@
       "minimum": 1,
       "maximum": 500,
       "editor": "number"
-    }
     },
     "proxyConfiguration": {
       "title": "Proxy Configuration",
