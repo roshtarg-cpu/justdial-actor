@@ -54,7 +54,7 @@ async def _fetch(url: str, proxy_url: str | None) -> str | None:
             Actor.log.info("Response size: %d bytes", len(html))
             if len(html) > 500:
                 return html
-            Actor.log.warning("Short response (%d bytes)", len(html))
+            Actor.log.warning("Short response (%d bytes): %r", len(html), html[:300])
     except Exception as exc:
         Actor.log.warning("Fetch failed: %s", exc)
     return None
