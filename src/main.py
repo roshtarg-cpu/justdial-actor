@@ -1,115 +1,81 @@
 """
-JustDial Business Listings Scraper — direct Playwright + stealth edition
-=========================================================================
-JustDial is protected by Akamai bot detection with two layers:
-  1. TLS fingerprint check  — solved by NOT disabling HTTP/2 (Chromium's TLS matches real Chrome)
-  2. JavaScript challenge   — solved by playwright-stealth applied BEFORE navigation
+JustDial Business Listings Scraper — curl_cffi + session edition
+=================================================================
+Akamai uses two detection layers:
+  1. HTTP/2 SETTINGS frame fingerprint — curl_cffi impersonates Chrome exactly, passes.
+     Playwright's headless Chromium has different SETTINGS values → Akamai sends GOAWAY.
+  2. JavaScript challenge — Akamai sets bm_sz cookie on first response (14-byte HTML).
+     curl_cffi AsyncSession persists cookies automatically, so the second GET (same session)
+     carries those cookies and Akamai typically allows through.
 
-playwright-stealth MUST run before page.goto(). Using crawlee's PlaywrightCrawler
-is not possible here because it navigates before our handler runs. We use the
-Playwright SDK directly for full control.
-
-All listing data is server-rendered into <script id="__NEXT_DATA__"> so once
-the page loads, extraction is a simple JSON parse — no CSS selectors needed.
+All listing data is in <script id="__NEXT_DATA__"> — no JS execution needed once we
+get the real page.
 """
 
 import asyncio
 import json
 import logging
 import re
-from urllib.parse import urlparse
 
 from apify import Actor
-from playwright.async_api import async_playwright
+from curl_cffi.requests import AsyncSession
 
 from .parser import parse_page
 from .utils import build_justdial_url, random_delay
 
 logger = logging.getLogger(__name__)
 
-_STEALTH_JS = """
-Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-Object.defineProperty(navigator, 'languages', { get: () => ['en-IN', 'en', 'hi'] });
-window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){}, app: {} };
-const _origPermissions = window.navigator.permissions.query.bind(navigator.permissions);
-window.navigator.permissions.query = p => p.name === 'notifications'
-    ? Promise.resolve({ state: Notification.permission })
-    : _origPermissions(p);
-"""
-
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
+_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 
-def _parse_proxy(proxy_url: str | None) -> dict | None:
-    if not proxy_url:
-        return None
-    p = urlparse(proxy_url)
-    proxy = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
-    if p.username:
-        proxy["username"] = p.username
-    if p.password:
-        proxy["password"] = p.password
-    return proxy
+async def _fetch(url: str, proxy_url: str | None, max_attempts: int = 5) -> str | None:
+    """
+    Fetch a JustDial page using a persistent curl_cffi session.
 
+    Akamai sets bm_sz on the first (blocked) response. The session carries
+    that cookie automatically on retries, which often clears the challenge.
+    """
+    proxies = {"https": proxy_url, "http": proxy_url} if proxy_url else None
 
-async def _fetch_page(url: str, proxy_url: str | None, retries: int = 3) -> str | None:
-    proxy = _parse_proxy(proxy_url)
-
-    for attempt in range(retries):
-        try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    proxy=proxy,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                    ],
+    async with AsyncSession(impersonate="chrome120") as session:
+        for attempt in range(max_attempts):
+            try:
+                r = await session.get(
+                    url,
+                    headers=_HEADERS,
+                    proxies=proxies,
+                    timeout=30,
                 )
-                context = await browser.new_context(
-                    locale="en-IN",
-                    timezone_id="Asia/Kolkata",
-                    viewport={"width": 1366, "height": 768},
-                    user_agent=_UA,
-                    extra_http_headers={
-                        "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
-                    },
+                cookies_set = list(session.cookies.keys())
+                Actor.log.info(
+                    "Attempt %d: HTTP %d — %d bytes — cookies: %s",
+                    attempt + 1, r.status_code, len(r.content), cookies_set,
                 )
-                page = await context.new_page()
 
-                # Stealth BEFORE navigation — add_init_script runs before any page JS
-                await page.add_init_script(_STEALTH_JS)
+                if r.status_code == 200 and len(r.text) > 500:
+                    return r.text
 
-                await page.goto(url, wait_until="networkidle", timeout=60_000)
-
-                # Wait for Next.js to inject __NEXT_DATA__
-                try:
-                    await page.wait_for_selector("#__NEXT_DATA__", timeout=15_000, state="attached")
-                except Exception:
-                    html = await page.content()
+                if len(r.content) < 500:
                     Actor.log.warning(
-                        "No __NEXT_DATA__ after networkidle on %s (%d bytes) — possible challenge page.",
-                        url, len(html),
+                        "Short response — likely Akamai challenge. Retrying with session cookies."
                     )
-                    await browser.close()
-                    if attempt < retries - 1:
-                        await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2)
                     continue
 
-                html = await page.content()
-                await browser.close()
-                return html
-
-        except Exception as exc:
-            Actor.log.warning("Attempt %d/%d failed for %s: %s", attempt + 1, retries, url, exc)
-            if attempt < retries - 1:
-                await asyncio.sleep(2 ** attempt)
+            except Exception as exc:
+                Actor.log.warning("Attempt %d/%d failed: %s", attempt + 1, max_attempts, exc)
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(2 ** min(attempt, 3))
 
     return None
 
@@ -163,9 +129,9 @@ async def main() -> None:
             if proxy_configuration:
                 proxy_url = await proxy_configuration.new_url(session_id=f"page_{page_num}")
 
-            html = await _fetch_page(url, proxy_url)
+            html = await _fetch(url, proxy_url)
             if not html:
-                Actor.log.error("Failed to fetch page %d after retries.", page_num)
+                Actor.log.error("Failed to fetch page %d after all attempts.", page_num)
                 break
 
             next_data = _extract_next_data(html)
@@ -201,7 +167,7 @@ async def main() -> None:
         if results_count == 0:
             Actor.log.warning(
                 "Zero results. Possible causes:\n"
-                "  • JustDial blocked the request — use RESIDENTIAL proxies with country=IN\n"
-                "  • The city/searchQuery returned no results\n"
-                "  • JustDial changed their data structure"
+                "  • Akamai challenge not resolved — try running again (cookies may need a warmup)\n"
+                "  • Use RESIDENTIAL proxies with apifyProxyCountry=IN\n"
+                "  • The city/searchQuery returned no results"
             )
