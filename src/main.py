@@ -25,32 +25,35 @@ logger = logging.getLogger(__name__)
 _SCRAPERAPI_URL = "https://api.scraperapi.com/"
 
 
-async def _fetch(url: str, api_key: str, retries: int = 3) -> str | None:
-    params = {
-        "api_key": api_key,
-        "url": url,
-        "render": "true",
-        "country_code": "in",
-    }
+_PARAM_SETS = [
+    {"render": "false", "country_code": "in", "premium": "true"},
+    {"render": "true",  "country_code": "in", "premium": "true"},
+    {"render": "true",  "country_code": "in", "ultra_premium": "true"},
+]
+
+
+async def _fetch(url: str, api_key: str) -> str | None:
     timeout = aiohttp.ClientTimeout(total=120)
 
-    for attempt in range(retries):
+    for i, extra in enumerate(_PARAM_SETS):
+        params = {"api_key": api_key, "url": url, **extra}
+        Actor.log.info("Attempt %d: params=%s", i + 1, extra)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(_SCRAPERAPI_URL, params=params) as r:
-                    Actor.log.info("Attempt %d: HTTP %d", attempt + 1, r.status)
+                    Actor.log.info("HTTP %d — %d bytes", r.status, r.content_length or 0)
                     if r.status == 200:
                         html = await r.text()
+                        Actor.log.info("Response size: %d bytes", len(html))
                         if len(html) > 500:
                             return html
                         Actor.log.warning("Short response (%d bytes)", len(html))
                     else:
-                        Actor.log.warning("ScraperAPI error: HTTP %d", r.status)
+                        Actor.log.warning("ScraperAPI HTTP %d", r.status)
         except Exception as exc:
-            Actor.log.warning("Attempt %d/%d failed: %s", attempt + 1, retries, exc)
+            Actor.log.warning("Attempt %d failed: %s", i + 1, exc)
 
-        if attempt < retries - 1:
-            await asyncio.sleep(2 ** attempt)
+        await asyncio.sleep(2)
 
     return None
 
