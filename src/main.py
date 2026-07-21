@@ -28,7 +28,12 @@ def _extract_next_data(html: str) -> dict | None:
 async def _fetch(url: str, proxy_url: str | None) -> str | None:
     proxy = {"server": proxy_url} if proxy_url else None
     try:
-        async with AsyncCamoufox(headless=True, proxy=proxy) as browser:
+        async with AsyncCamoufox(
+            headless=True,
+            proxy=proxy,
+            geoip=True,
+            firefox_user_prefs={"security.sandbox.content.level": 0},
+        ) as browser:
             page = await browser.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             html = await page.content()
