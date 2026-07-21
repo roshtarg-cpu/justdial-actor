@@ -1,81 +1,75 @@
 """
-JustDial Business Listings Scraper — curl_cffi + session edition
-=================================================================
-Akamai uses two detection layers:
-  1. HTTP/2 SETTINGS frame fingerprint — curl_cffi impersonates Chrome exactly, passes.
-     Playwright's headless Chromium has different SETTINGS values → Akamai sends GOAWAY.
-  2. JavaScript challenge — Akamai sets bm_sz cookie on first response (14-byte HTML).
-     curl_cffi AsyncSession persists cookies automatically, so the second GET (same session)
-     carries those cookies and Akamai typically allows through.
+JustDial Business Listings Scraper — Apify Scraping Browser edition
+====================================================================
+JustDial is protected by Akamai bot detection that requires:
+  1. Chrome-identical TLS + HTTP/2 fingerprint
+  2. JavaScript sensor data collected and signed by the browser
 
-All listing data is in <script id="__NEXT_DATA__"> — no JS execution needed once we
-get the real page.
+Both are handled by Apify's Scraping Browser — a managed real Chrome instance
+accessible via CDP WebSocket. We connect to it instead of launching a local browser.
+
+All listing data is in <script id="__NEXT_DATA__"> — once we get past Akamai,
+extraction is a simple JSON parse.
+
+Setup required: Enable "Scraping Browser" in your Apify actor's settings.
 """
 
 import asyncio
 import json
 import logging
+import os
 import re
 
 from apify import Actor
-from curl_cffi.requests import AsyncSession
+from playwright.async_api import async_playwright
 
 from .parser import parse_page
 from .utils import build_justdial_url, random_delay
 
 logger = logging.getLogger(__name__)
 
-_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-}
 
+async def _fetch_page(url: str, retries: int = 3) -> str | None:
+    token = os.environ.get("APIFY_TOKEN", "")
+    endpoint = f"wss://chrome.apify.com?token={token}"
 
-async def _fetch(url: str, proxy_url: str | None, max_attempts: int = 5) -> str | None:
-    """
-    Fetch a JustDial page using a persistent curl_cffi session.
+    for attempt in range(retries):
+        try:
+            async with async_playwright() as pw:
+                Actor.log.info("Connecting to Apify Scraping Browser (attempt %d)…", attempt + 1)
+                browser = await pw.chromium.connect_over_cdp(endpoint, timeout=30_000)
 
-    Akamai sets bm_sz on the first (blocked) response. The session carries
-    that cookie automatically on retries, which often clears the challenge.
-    """
-    proxies = {"https": proxy_url, "http": proxy_url} if proxy_url else None
-
-    async with AsyncSession(impersonate="chrome120") as session:
-        for attempt in range(max_attempts):
-            try:
-                r = await session.get(
-                    url,
-                    headers=_HEADERS,
-                    proxies=proxies,
-                    timeout=30,
+                context = await browser.new_context(
+                    locale="en-IN",
+                    timezone_id="Asia/Kolkata",
+                    extra_http_headers={
+                        "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
+                    },
                 )
-                cookies_set = list(session.cookies.keys())
-                Actor.log.info(
-                    "Attempt %d: HTTP %d — %d bytes — cookies: %s",
-                    attempt + 1, r.status_code, len(r.content), cookies_set,
-                )
+                page = await context.new_page()
 
-                if r.status_code == 200 and len(r.text) > 500:
-                    return r.text
+                await page.goto(url, wait_until="networkidle", timeout=60_000)
 
-                if len(r.content) < 500:
+                try:
+                    await page.wait_for_selector("#__NEXT_DATA__", timeout=15_000, state="attached")
+                except Exception:
+                    html = await page.content()
                     Actor.log.warning(
-                        "Short response — likely Akamai challenge. Retrying with session cookies."
+                        "No __NEXT_DATA__ after networkidle (%d bytes) — possible block.", len(html)
                     )
-                    await asyncio.sleep(2)
+                    await browser.close()
+                    if attempt < retries - 1:
+                        await asyncio.sleep(3)
                     continue
 
-            except Exception as exc:
-                Actor.log.warning("Attempt %d/%d failed: %s", attempt + 1, max_attempts, exc)
-                if attempt < max_attempts - 1:
-                    await asyncio.sleep(2 ** min(attempt, 3))
+                html = await page.content()
+                await browser.close()
+                return html
+
+        except Exception as exc:
+            Actor.log.warning("Attempt %d/%d failed: %s", attempt + 1, retries, exc)
+            if attempt < retries - 1:
+                await asyncio.sleep(2 ** attempt)
 
     return None
 
@@ -97,7 +91,6 @@ async def main() -> None:
         search_query: str = actor_input.get("searchQuery", "").strip()
         city: str = actor_input.get("city", "").strip()
         max_results: int = int(actor_input.get("maxResults", 50))
-        proxy_config_input = actor_input.get("proxyConfiguration")
 
         if not search_query or not city:
             await Actor.fail(status_message="Both 'searchQuery' and 'city' are required.")
@@ -108,15 +101,11 @@ async def main() -> None:
             search_query, city, max_results,
         )
 
-        proxy_configuration = None
-        if proxy_config_input:
-            try:
-                proxy_configuration = await Actor.create_proxy_configuration(
-                    actor_proxy_input=proxy_config_input
-                )
-                Actor.log.info("Proxy configuration ready")
-            except Exception as exc:
-                Actor.log.warning("Could not create proxy config: %s", exc)
+        if not os.environ.get("APIFY_TOKEN"):
+            await Actor.fail(
+                status_message="APIFY_TOKEN not found. Enable 'Scraping Browser' in actor settings."
+            )
+            return
 
         results_count = 0
         page_num = 1
@@ -125,20 +114,14 @@ async def main() -> None:
             url = build_justdial_url(city, search_query, page=page_num)
             Actor.log.info("Fetching page %d: %s", page_num, url)
 
-            proxy_url = None
-            if proxy_configuration:
-                proxy_url = await proxy_configuration.new_url(session_id=f"page_{page_num}")
-
-            html = await _fetch(url, proxy_url)
+            html = await _fetch_page(url)
             if not html:
-                Actor.log.error("Failed to fetch page %d after all attempts.", page_num)
+                Actor.log.error("Failed to fetch page %d after retries.", page_num)
                 break
 
             next_data = _extract_next_data(html)
             if not next_data:
-                Actor.log.warning(
-                    "No __NEXT_DATA__ on page %d (%d bytes).", page_num, len(html)
-                )
+                Actor.log.warning("No __NEXT_DATA__ on page %d (%d bytes).", page_num, len(html))
                 break
 
             listings, _ = parse_page(next_data, city)
@@ -166,8 +149,8 @@ async def main() -> None:
         )
         if results_count == 0:
             Actor.log.warning(
-                "Zero results. Possible causes:\n"
-                "  • Akamai challenge not resolved — try running again (cookies may need a warmup)\n"
-                "  • Use RESIDENTIAL proxies with apifyProxyCountry=IN\n"
-                "  • The city/searchQuery returned no results"
+                "Zero results. Check:\n"
+                "  • Scraping Browser is enabled in actor settings\n"
+                "  • The city/searchQuery is valid\n"
+                "  • JustDial has not changed their data structure"
             )
