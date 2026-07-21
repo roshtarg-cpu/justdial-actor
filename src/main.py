@@ -7,6 +7,7 @@ Akamai bot detection. No external services required.
 
 import json
 import re
+from urllib.parse import urlparse
 
 from camoufox.async_api import AsyncCamoufox
 from apify import Actor
@@ -25,8 +26,20 @@ def _extract_next_data(html: str) -> dict | None:
         return None
 
 
+def _parse_proxy(proxy_url: str | None) -> dict | None:
+    if not proxy_url:
+        return None
+    p = urlparse(proxy_url)
+    proxy = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
+    if p.username:
+        proxy["username"] = p.username
+    if p.password:
+        proxy["password"] = p.password
+    return proxy
+
+
 async def _fetch(url: str, proxy_url: str | None) -> str | None:
-    proxy = {"server": proxy_url} if proxy_url else None
+    proxy = _parse_proxy(proxy_url)
     try:
         async with AsyncCamoufox(
             headless=True,
