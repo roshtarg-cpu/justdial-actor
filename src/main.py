@@ -83,10 +83,8 @@ async def main() -> None:
         api_key = (
             actor_input.get("scraperApiKey", "")
             or os.environ.get("SCRAPERAPI_KEY", "")
+            or "0e8ae0f9818e60aab8add3b0bf2cb632"
         ).strip()
-        if not api_key:
-            await Actor.fail(status_message="scraperApiKey input or SCRAPERAPI_KEY env var required.")
-            return
 
         Actor.log.info(
             "JustDial scrape — query: '%s' | city: '%s' | max: %d",
