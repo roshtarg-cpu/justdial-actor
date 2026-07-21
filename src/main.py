@@ -77,9 +77,12 @@ async def main() -> None:
             await Actor.fail(status_message="Both 'searchQuery' and 'city' are required.")
             return
 
-        api_key = os.environ.get("SCRAPERAPI_KEY", "").strip()
+        api_key = (
+            actor_input.get("scraperApiKey", "")
+            or os.environ.get("SCRAPERAPI_KEY", "")
+        ).strip()
         if not api_key:
-            await Actor.fail(status_message="SCRAPERAPI_KEY environment variable not set.")
+            await Actor.fail(status_message="scraperApiKey input or SCRAPERAPI_KEY env var required.")
             return
 
         Actor.log.info(
