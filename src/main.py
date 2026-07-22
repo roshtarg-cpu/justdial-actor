@@ -51,10 +51,10 @@ async def _fetch(url: str, proxy_url: str | None) -> str | None:
             await page.goto(url, wait_until="networkidle", timeout=90000)
             await page.wait_for_timeout(3000)
             html = await page.content()
-            Actor.log.info("Response size: %d bytes", len(html))
+            Actor.log.info("Response size: %d bytes | final URL: %s", len(html), page.url)
             if len(html) > 500:
                 return html
-            Actor.log.warning("Short response (%d bytes)", len(html))
+            Actor.log.warning("Short response (%d bytes): %r", len(html), html[:300])
     except Exception as exc:
         Actor.log.warning("Fetch failed: %s", exc)
     return None
