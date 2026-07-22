@@ -38,25 +38,29 @@ def _parse_proxy(proxy_url: str | None) -> dict | None:
     return proxy
 
 
-async def _fetch(url: str, proxy_url: str | None) -> str | None:
-    proxy = _parse_proxy(proxy_url)
-    try:
-        async with AsyncCamoufox(
-            headless=True,
-            proxy=proxy,
-            geoip=True,
-            firefox_user_prefs={"security.sandbox.content.level": 0},
-        ) as browser:
-            page = await browser.new_page()
-            await page.goto(url, wait_until="networkidle", timeout=90000)
-            await page.wait_for_timeout(3000)
-            html = await page.content()
-            Actor.log.info("Response size: %d bytes | final URL: %s", len(html), page.url)
-            if len(html) > 500:
-                return html
-            Actor.log.warning("Short response (%d bytes): %r", len(html), html[:300])
-    except Exception as exc:
-        Actor.log.warning("Fetch failed: %s", exc)
+async def _fetch(url: str, proxy_cfg, max_retries: int = 5) -> str | None:
+    for attempt in range(1, max_retries + 1):
+        proxy_url = await proxy_cfg.new_url() if proxy_cfg else None
+        proxy = _parse_proxy(proxy_url)
+        proxy_host = urlparse(proxy_url).hostname if proxy_url else "no-proxy"
+        Actor.log.info("Attempt %d/%d | proxy: %s", attempt, max_retries, proxy_host)
+        try:
+            async with AsyncCamoufox(
+                headless=True,
+                proxy=proxy,
+                geoip=True,
+                firefox_user_prefs={"security.sandbox.content.level": 0},
+            ) as browser:
+                page = await browser.new_page()
+                await page.goto(url, wait_until="networkidle", timeout=90000)
+                await page.wait_for_timeout(3000)
+                html = await page.content()
+                Actor.log.info("Response size: %d bytes", len(html))
+                if len(html) > 500 and "Access Denied" not in html:
+                    return html
+                Actor.log.warning("Blocked/short response (%d bytes) — rotating IP", len(html))
+        except Exception as exc:
+            Actor.log.warning("Attempt %d failed: %s", attempt, exc)
     return None
 
 
@@ -88,8 +92,7 @@ async def main() -> None:
             url = build_justdial_url(city, search_query, page=page_num)
             Actor.log.info("Fetching page %d: %s", page_num, url)
 
-            proxy_url = await proxy_cfg.new_url() if proxy_cfg else None
-            html = await _fetch(url, proxy_url)
+            html = await _fetch(url, proxy_cfg)
 
             if not html:
                 Actor.log.error("Failed to fetch page %d.", page_num)
