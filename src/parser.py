@@ -179,7 +179,8 @@ def parse_page(next_data: dict, input_city: str) -> tuple[list[dict], dict]:
     """
     list_data = extract_list_data(next_data)
     if not list_data:
-        logger.warning("listData not found in __NEXT_DATA__")
+        page_props = next_data.get("props", {}).get("pageProps", {})
+        logger.warning("listData not found. pageProps keys: %s", list(page_props.keys())[:20])
         return [], {}
 
     pagination = extract_pagination_info(list_data)
