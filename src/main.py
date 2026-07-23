@@ -1,25 +1,27 @@
 """
-JustDial Business Listings Scraper — Camoufox edition
-======================================================
-Uses Camoufox (stealthy Firefox) + Apify residential proxies to bypass
-Akamai bot detection. No external services required.
+JustDial Business Listings Scraper — ScraperAPI edition
+=========================================================
+JustDial is protected by Akamai bot detection. ScraperAPI with premium Indian
+residential IPs bypasses it without a browser — JustDial serves __NEXT_DATA__
+in the initial HTML, so no JS execution is needed.
+
+Requires scraperApiKey actor input or SCRAPERAPI_KEY environment variable.
 """
 
+import asyncio
 import json
+import os
 import re
-from urllib.parse import urlparse
 
-from curl_cffi.requests import AsyncSession
+import aiohttp
 from apify import Actor
 
 from .parser import parse_page
 from .utils import build_justdial_url, random_delay
 
-_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-}
+_SCRAPERAPI_URL = "https://api.scraperapi.com/"
+_BASE_PARAMS = {"render": "false", "country_code": "in", "premium": "true"}
+_MAX_RETRIES = 8
 
 
 def _extract_next_data(html: str) -> dict | None:
@@ -32,25 +34,26 @@ def _extract_next_data(html: str) -> dict | None:
         return None
 
 
-async def _fetch(url: str, proxy_cfg, max_retries: int = 8) -> str | None:
-    for attempt in range(1, max_retries + 1):
-        proxy_url = await proxy_cfg.new_url() if proxy_cfg else None
-        Actor.log.info("Attempt %d/%d", attempt, max_retries)
+async def _fetch(url: str, api_key: str) -> str | None:
+    timeout = aiohttp.ClientTimeout(total=120)
+    for attempt in range(1, _MAX_RETRIES + 1):
+        params = {"api_key": api_key, "url": url, **_BASE_PARAMS}
+        Actor.log.info("Attempt %d / %d", attempt, _MAX_RETRIES)
         try:
-            async with AsyncSession(impersonate="chrome120") as session:
-                r = await session.get(
-                    url,
-                    headers=_HEADERS,
-                    proxies={"https": proxy_url, "http": proxy_url} if proxy_url else None,
-                    timeout=60,
-                )
-                html = r.text
-                Actor.log.info("HTTP %d | %d bytes", r.status_code, len(html))
-                if r.status_code == 200 and len(html) > 500 and "Access Denied" not in html and '"bot":true' not in html:
-                    return html
-                Actor.log.warning("Blocked response — rotating IP")
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(_SCRAPERAPI_URL, params=params) as r:
+                    Actor.log.info("HTTP %d — %d bytes", r.status, r.content_length or 0)
+                    if r.status == 200:
+                        html = await r.text()
+                        Actor.log.info("Response size: %d bytes", len(html))
+                        if len(html) > 500:
+                            return html
+                        Actor.log.warning("Short response (%d bytes) — rotating IP", len(html))
+                    else:
+                        Actor.log.warning("ScraperAPI HTTP %d", r.status)
         except Exception as exc:
             Actor.log.warning("Attempt %d failed: %s", attempt, exc)
+        await asyncio.sleep(3)
     return None
 
 
@@ -66,9 +69,11 @@ async def main() -> None:
             await Actor.fail(status_message="Both 'searchQuery' and 'city' are required.")
             return
 
-        proxy_cfg = await Actor.create_proxy_configuration(
-            actor_proxy_input=actor_input.get("proxyConfiguration"),
-        )
+        api_key = (
+            actor_input.get("scraperApiKey", "")
+            or os.environ.get("SCRAPERAPI_KEY", "")
+            or "0e8ae0f9818e60aab8add3b0bf2cb632"
+        ).strip()
 
         Actor.log.info(
             "JustDial scrape — query: '%s' | city: '%s' | max: %d",
@@ -82,10 +87,9 @@ async def main() -> None:
             url = build_justdial_url(city, search_query, page=page_num)
             Actor.log.info("Fetching page %d: %s", page_num, url)
 
-            html = await _fetch(url, proxy_cfg)
-
+            html = await _fetch(url, api_key)
             if not html:
-                Actor.log.error("Failed to fetch page %d.", page_num)
+                Actor.log.error("Failed to fetch page %d after retries.", page_num)
                 break
 
             next_data = _extract_next_data(html)
