@@ -20,7 +20,11 @@ from .parser import parse_page
 from .utils import build_justdial_url, random_delay
 
 _SCRAPERAPI_URL = "https://api.scraperapi.com/"
-_BASE_PARAMS = {"render": "false", "country_code": "in", "premium": "true"}
+_PARAM_SETS = [
+    {"render": "true", "country_code": "in", "premium": "true"},
+    {"render": "true", "country_code": "in", "ultra_premium": "true"},
+    {"render": "false", "country_code": "in", "premium": "true"},
+]
 _MAX_RETRIES = 8
 
 
@@ -35,10 +39,10 @@ def _extract_next_data(html: str) -> dict | None:
 
 
 async def _fetch(url: str, api_key: str) -> str | None:
-    timeout = aiohttp.ClientTimeout(total=120)
-    for attempt in range(1, _MAX_RETRIES + 1):
-        params = {"api_key": api_key, "url": url, **_BASE_PARAMS}
-        Actor.log.info("Attempt %d / %d", attempt, _MAX_RETRIES)
+    timeout = aiohttp.ClientTimeout(total=180)
+    for i, params_extra in enumerate(_PARAM_SETS):
+        params = {"api_key": api_key, "url": url, **params_extra}
+        Actor.log.info("Attempt %d / %d | params: %s", i + 1, len(_PARAM_SETS), params_extra)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(_SCRAPERAPI_URL, params=params) as r:
@@ -46,13 +50,13 @@ async def _fetch(url: str, api_key: str) -> str | None:
                     if r.status == 200:
                         html = await r.text()
                         Actor.log.info("Response size: %d bytes", len(html))
-                        if len(html) > 500:
+                        if len(html) > 500 and "listData" in html:
                             return html
-                        Actor.log.warning("Short response (%d bytes) — rotating IP", len(html))
+                        Actor.log.warning("No listData in response (%d bytes)", len(html))
                     else:
                         Actor.log.warning("ScraperAPI HTTP %d", r.status)
         except Exception as exc:
-            Actor.log.warning("Attempt %d failed: %s", attempt, exc)
+            Actor.log.warning("Attempt %d failed: %s", i + 1, exc)
         await asyncio.sleep(3)
     return None
 
