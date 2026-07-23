@@ -9,11 +9,17 @@ import json
 import re
 from urllib.parse import urlparse
 
-from camoufox.async_api import AsyncCamoufox
+from curl_cffi.requests import AsyncSession
 from apify import Actor
 
 from .parser import parse_page
 from .utils import build_justdial_url, random_delay
+
+_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+}
 
 
 def _extract_next_data(html: str) -> dict | None:
@@ -26,42 +32,23 @@ def _extract_next_data(html: str) -> dict | None:
         return None
 
 
-def _parse_proxy(proxy_url: str | None) -> dict | None:
-    if not proxy_url:
-        return None
-    p = urlparse(proxy_url)
-    proxy = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
-    if p.username:
-        proxy["username"] = p.username
-    if p.password:
-        proxy["password"] = p.password
-    return proxy
-
-
-async def _fetch(url: str, proxy_cfg, max_retries: int = 5) -> str | None:
+async def _fetch(url: str, proxy_cfg, max_retries: int = 8) -> str | None:
     for attempt in range(1, max_retries + 1):
         proxy_url = await proxy_cfg.new_url() if proxy_cfg else None
-        proxy = _parse_proxy(proxy_url)
-        proxy_host = urlparse(proxy_url).hostname if proxy_url else "no-proxy"
-        Actor.log.info("Attempt %d/%d | proxy: %s", attempt, max_retries, proxy_host)
+        Actor.log.info("Attempt %d/%d", attempt, max_retries)
         try:
-            async with AsyncCamoufox(
-                headless=True,
-                proxy=proxy,
-                geoip=True,
-                firefox_user_prefs={"security.sandbox.content.level": 0},
-            ) as browser:
-                page = await browser.new_page()
-                await page.goto("https://api.ipify.org?format=json", wait_until="domcontentloaded", timeout=30000)
-                ip_text = await page.inner_text("body")
-                Actor.log.info("External IP seen by target: %s", ip_text.strip())
-                await page.goto(url, wait_until="networkidle", timeout=90000)
-                await page.wait_for_timeout(3000)
-                html = await page.content()
-                Actor.log.info("Response size: %d bytes", len(html))
-                if len(html) > 500 and "Access Denied" not in html:
+            async with AsyncSession(impersonate="chrome120") as session:
+                r = await session.get(
+                    url,
+                    headers=_HEADERS,
+                    proxies={"https": proxy_url, "http": proxy_url} if proxy_url else None,
+                    timeout=60,
+                )
+                html = r.text
+                Actor.log.info("HTTP %d | %d bytes", r.status_code, len(html))
+                if r.status_code == 200 and len(html) > 500 and "Access Denied" not in html and '"bot":true' not in html:
                     return html
-                Actor.log.warning("Blocked/short response (%d bytes) — rotating IP", len(html))
+                Actor.log.warning("Blocked response — rotating IP")
         except Exception as exc:
             Actor.log.warning("Attempt %d failed: %s", attempt, exc)
     return None
