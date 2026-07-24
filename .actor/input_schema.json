@@ -26,10 +26,10 @@
       "maximum": 500,
       "editor": "number"
     },
-    "zenrowsApiKey": {
-      "title": "Zenrows API Key",
+    "scraperApiKey": {
+      "title": "ScraperAPI Key",
       "type": "string",
-      "description": "Your Zenrows API key from zenrows.com. Required to bypass bot detection.",
+      "description": "Your ScraperAPI key. Optional — a default key is built in.",
       "editor": "textfield"
     }
   },
